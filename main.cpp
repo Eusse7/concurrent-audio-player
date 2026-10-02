@@ -16,6 +16,7 @@ void printMenu() {
               << "  mv <id> <pos> - Mover canción a una nueva posición (0-index)\n"
               << "  ls            - Mostrar lista de reproducción\n"
               << "  clear         - Vaciar lista de reproducción\n"
+              << "  v             - Mostrar/Ocultar Visualizador de Espectro\n"
               << "  exit          - Salir\n"
               << "> " << std::flush;
 }
@@ -73,6 +74,14 @@ int main() {
         } else if (cmd == "clear") {
             playlist.clear();
             std::cout << "> " << std::flush;
+        } else if (cmd == "v") {
+            engine->toggleVisualizer();
+            if (engine->isVisualizerActive()) {
+                std::cout << "\033[2J\033[H"; // Limpiar consola
+            } else {
+                std::cout << "\033[11B\n\n"; // Mover cursor abajo para no sobreescribir y reimprimir
+                printMenu();
+            }
         } else if (cmd == "exit") {
             break;
         } else if (cmd == "help") {

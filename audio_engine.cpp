@@ -8,6 +8,7 @@ void sleep_ms(int ms) {
 }
 
 AudioEngine::AudioEngine(Playlist* pl) : playlist(pl), head(0), tail(0), count(0), current_frame_offset(0),
+    current_amplitude(0.0f), visualizer_active(false),
     flush_requested(false), state(STOPPED), pending_command(CMD_NONE), exit_requested(false) {
 }
 
@@ -17,6 +18,7 @@ AudioEngine::~AudioEngine() {
 void AudioEngine::start() {
     producer_thread = std::thread(AudioEngine::producerLoop, this);
     consumer_thread = std::thread(AudioEngine::consumerLoop, this);
+    visualizer_thread = std::thread(AudioEngine::visualizerLoop, this);
 }
 
 void AudioEngine::stopEngine() {
@@ -35,6 +37,12 @@ void AudioEngine::stopEngine() {
 
     if (producer_thread.joinable()) producer_thread.join();
     if (consumer_thread.joinable()) consumer_thread.join();
+    if (visualizer_thread.joinable()) visualizer_thread.join();
+}
+
+void AudioEngine::toggleVisualizer() {
+    bool current = visualizer_active.load();
+    visualizer_active.store(!current);
 }
 
 void AudioEngine::play() {
@@ -300,5 +308,66 @@ void AudioEngine::data_callback(ma_device* pDevice, void* pOutput, const void* p
     
     if (framesToRead > 0) {
         std::memset(pOut + (outOffset * CHANNELS), 0, framesToRead * CHANNELS * sizeof(float));
+    }
+    
+    // Calcular amplitud (Peak)
+    float peak = 0.0f;
+    for (ma_uint32 i = 0; i < frameCount * CHANNELS; ++i) {
+        float val = pOut[i];
+        if (val < 0) val = -val;
+        if (val > peak) peak = val;
+    }
+    engine->current_amplitude.store(peak);
+}
+
+#include <random>
+
+void AudioEngine::visualizerLoop(AudioEngine* engine) {
+    const int NUM_BARS = 30;
+    const int MAX_HEIGHT = 8;
+    std::mt19937 gen(1337);
+    
+    while (true) {
+        bool should_exit = false;
+        {
+            std::unique_lock<std::mutex> state_lock(engine->state_mutex);
+            should_exit = engine->exit_requested;
+        }
+        if (should_exit) break;
+        
+        if (engine->visualizer_active.load() && engine->state == PLAYING) {
+            float peak = engine->current_amplitude.load() * 3.0f;
+            if (peak > 1.0f) peak = 1.0f;
+            
+            int heights[NUM_BARS];
+            for (int i = 0; i < NUM_BARS; i++) {
+                float distance = std::abs(i - (NUM_BARS / 2.0f)) / (NUM_BARS / 2.0f);
+                float bell = 1.0f - (distance * distance); // Parabola (campana invertida)
+                if (bell < 0) bell = 0;
+                
+                float noise = (gen() % 100) / 100.0f;
+                heights[i] = (int)(peak * bell * MAX_HEIGHT * (0.3f + noise * 0.7f));
+            }
+            
+            std::string output = "\n";
+            for (int h = MAX_HEIGHT; h >= 1; h--) {
+                output += "    ";
+                for (int i = 0; i < NUM_BARS; i++) {
+                    if (heights[i] >= h) {
+                        if (h >= 6) output += "\033[35m"; // Magenta
+                        else if (h >= 3) output += "\033[34m"; // Azul
+                        else output += "\033[36m"; // Cyan
+                        output += "██ \033[0m";
+                    } else {
+                        output += "   ";
+                    }
+                }
+                output += "\n";
+            }
+            output += "\n    \033[33m(Escribe 'v' y presiona ENTER para regresar)\033[0m\n";
+            std::cout << output;
+            std::cout << "\033[" << (MAX_HEIGHT + 3) << "A" << std::flush;
+        }
+        sleep_ms(50);
     }
 }

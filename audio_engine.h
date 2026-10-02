@@ -47,6 +47,12 @@ private:
     int count;
     int current_frame_offset;
     
+    // Visualizer
+    std::atomic<float> current_amplitude;
+    std::atomic<bool> visualizer_active;
+    std::thread visualizer_thread;
+    static void visualizerLoop(AudioEngine* engine);
+    
     // Synchronization for buffer
     std::mutex buffer_mutex;
     std::condition_variable not_full;
@@ -78,6 +84,9 @@ public:
     void stop();
     void next();
     void prev();
+    
+    void toggleVisualizer();
+    bool isVisualizerActive() const { return visualizer_active.load(); }
 };
 
 #endif
