@@ -9,7 +9,8 @@ void sleep_ms(int ms) {
 
 AudioEngine::AudioEngine(Playlist* pl) : playlist(pl), head(0), tail(0), count(0), current_frame_offset(0),
     current_amplitude(0.0f), visualizer_active(false),
-    flush_requested(false), state(STOPPED), pending_command(CMD_NONE), exit_requested(false) {
+    flush_requested(false), state(STOPPED), pending_command(CMD_NONE), exit_requested(false),
+    fx_head(0), fx_tail(0), fx_count(0), fx_current_frame_offset(0), fx_flush_requested(false), fx_play_requested(false) {
 }
 
 AudioEngine::~AudioEngine() {
@@ -19,6 +20,7 @@ void AudioEngine::start() {
     producer_thread = std::thread(AudioEngine::producerLoop, this);
     consumer_thread = std::thread(AudioEngine::consumerLoop, this);
     visualizer_thread = std::thread(AudioEngine::visualizerLoop, this);
+    fx_producer_thread = std::thread(AudioEngine::fxProducerLoop, this);
 }
 
 void AudioEngine::stopEngine() {
@@ -34,10 +36,18 @@ void AudioEngine::stopEngine() {
         not_full.notify_all();
         not_empty.notify_all();
     }
+    
+    {
+        std::unique_lock<std::mutex> fx_lock(fx_state_mutex);
+        fx_play_requested = false;
+        fx_flush_requested = true;
+        fx_state_cond.notify_all();
+    }
 
     if (producer_thread.joinable()) producer_thread.join();
     if (consumer_thread.joinable()) consumer_thread.join();
     if (visualizer_thread.joinable()) visualizer_thread.join();
+    if (fx_producer_thread.joinable()) fx_producer_thread.join();
 }
 
 void AudioEngine::toggleVisualizer() {
@@ -67,6 +77,13 @@ void AudioEngine::next() {
     std::unique_lock<std::mutex> lock(state_mutex);
     pending_command = CMD_NEXT;
     state_cond.notify_all();
+}
+
+void AudioEngine::playEffect(const std::string& filename) {
+    std::unique_lock<std::mutex> lock(fx_state_mutex);
+    fx_file_to_play = filename;
+    fx_play_requested = true;
+    fx_state_cond.notify_all();
 }
 
 void AudioEngine::prev() {
@@ -287,9 +304,11 @@ void AudioEngine::data_callback(ma_device* pDevice, void* pOutput, const void* p
         int toCopy = (available < (int)framesToRead) ? available : framesToRead;
         
         if (toCopy > 0) {
-            std::memcpy(pOut + (outOffset * CHANNELS), 
-                        frame.samples + (engine->current_frame_offset * CHANNELS), 
-                        toCopy * CHANNELS * sizeof(float));
+            float* src = frame.samples + (engine->current_frame_offset * CHANNELS);
+            float* dst = pOut + (outOffset * CHANNELS);
+            for (int i = 0; i < toCopy * CHANNELS; i++) {
+                dst[i] = src[i] * 0.8f; 
+            }
             
             engine->current_frame_offset += toCopy;
             outOffset += toCopy;
@@ -309,6 +328,39 @@ void AudioEngine::data_callback(ma_device* pDevice, void* pOutput, const void* p
     if (framesToRead > 0) {
         std::memset(pOut + (outOffset * CHANNELS), 0, framesToRead * CHANNELS * sizeof(float));
     }
+    
+    // --- Mix FX Audio ---
+    ma_uint32 fxFramesToRead = frameCount;
+    ma_uint32 fxOutOffset = 0;
+    
+    std::unique_lock<std::mutex> fx_buf_lock(engine->fx_buffer_mutex);
+    
+    while (fxFramesToRead > 0 && engine->fx_count > 0) {
+        AudioFrame& frame = engine->fx_buffer[engine->fx_head];
+        
+        int available = frame.valid_frames - engine->fx_current_frame_offset;
+        int toCopy = (available < (int)fxFramesToRead) ? available : fxFramesToRead;
+        
+        if (toCopy > 0) {
+            float* src = frame.samples + (engine->fx_current_frame_offset * CHANNELS);
+            float* dst = pOut + (fxOutOffset * CHANNELS);
+            for (int i = 0; i < toCopy * CHANNELS; i++) {
+                dst[i] += src[i] * 0.8f; // Add FX on top of existing audio
+            }
+            
+            engine->fx_current_frame_offset += toCopy;
+            fxOutOffset += toCopy;
+            fxFramesToRead -= toCopy;
+        }
+        
+        if (engine->fx_current_frame_offset >= frame.valid_frames) {
+            engine->fx_head = (engine->fx_head + 1) % BUFFER_CAPACITY;
+            engine->fx_count--;
+            engine->fx_current_frame_offset = 0;
+            engine->fx_not_full.notify_all();
+        }
+    }
+    fx_buf_lock.unlock();
     
     // Calcular amplitud (Peak)
     float peak = 0.0f;
@@ -370,4 +422,83 @@ void AudioEngine::visualizerLoop(AudioEngine* engine) {
         }
         sleep_ms(50);
     }
+}
+
+void AudioEngine::fxProducerLoop(AudioEngine* engine) {
+    ma_decoder decoder;
+    bool is_decoder_initialized = false;
+    
+    auto cleanup_decoder = [&]() {
+        if (is_decoder_initialized) {
+            ma_decoder_uninit(&decoder);
+            is_decoder_initialized = false;
+        }
+    };
+    
+    while (true) {
+        std::unique_lock<std::mutex> fx_lock(engine->fx_state_mutex);
+        
+        while (!engine->fx_play_requested && !engine->exit_requested) {
+            engine->fx_state_cond.wait(fx_lock);
+        }
+        
+        if (engine->exit_requested) {
+            break;
+        }
+        
+        std::string file_to_play = engine->fx_file_to_play;
+        engine->fx_play_requested = false;
+        fx_lock.unlock();
+        
+        cleanup_decoder();
+        ma_decoder_config config = ma_decoder_config_init(ma_format_f32, CHANNELS, 44100);
+        if (ma_decoder_init_file(file_to_play.c_str(), &config, &decoder) != MA_SUCCESS) {
+            std::cout << "\n[FX] Error al cargar efecto: " << file_to_play << "\n> " << std::flush;
+            continue;
+        }
+        is_decoder_initialized = true;
+        
+        // Reset fx buffer
+        {
+            std::unique_lock<std::mutex> buf_lock(engine->fx_buffer_mutex);
+            engine->fx_head = engine->fx_tail = engine->fx_count = engine->fx_current_frame_offset = 0;
+            engine->fx_flush_requested = false;
+        }
+        
+        while (true) {
+            {
+                std::unique_lock<std::mutex> check_lock(engine->fx_state_mutex);
+                if (engine->exit_requested || engine->fx_play_requested || engine->fx_flush_requested) {
+                    break;
+                }
+            }
+            
+            AudioFrame new_frame;
+            ma_uint64 framesRead = 0;
+            ma_decoder_read_pcm_frames(&decoder, new_frame.samples, SAMPLES_PER_CHUNK, &framesRead);
+            new_frame.valid_frames = (int)framesRead;
+            
+            if (framesRead == 0) {
+                // EOF reached
+                break;
+            }
+            
+            std::unique_lock<std::mutex> buf_lock(engine->fx_buffer_mutex);
+            while (engine->fx_count == BUFFER_CAPACITY && !engine->fx_flush_requested && !engine->exit_requested && !engine->fx_play_requested) {
+                engine->fx_not_full.wait(buf_lock);
+            }
+            
+            if (engine->exit_requested || engine->fx_flush_requested || engine->fx_play_requested) {
+                break;
+            }
+            
+            engine->fx_buffer[engine->fx_tail] = new_frame;
+            engine->fx_tail = (engine->fx_tail + 1) % BUFFER_CAPACITY;
+            engine->fx_count++;
+            engine->fx_not_empty.notify_all();
+            buf_lock.unlock();
+        }
+    }
+    
+    cleanup_decoder();
 }

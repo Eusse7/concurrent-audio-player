@@ -40,6 +40,26 @@ private:
     std::thread producer_thread;
     std::thread consumer_thread;
     
+    // --- FX SYSTEM (Second Producer) ---
+    AudioFrame fx_buffer[BUFFER_CAPACITY];
+    int fx_head;
+    int fx_tail;
+    int fx_count;
+    int fx_current_frame_offset;
+    bool fx_flush_requested;
+    
+    std::mutex fx_buffer_mutex;
+    std::condition_variable fx_not_full;
+    std::condition_variable fx_not_empty;
+    
+    std::string fx_file_to_play;
+    bool fx_play_requested;
+    std::mutex fx_state_mutex;
+    std::condition_variable fx_state_cond;
+    std::thread fx_producer_thread;
+    static void fxProducerLoop(AudioEngine* engine);
+    // -----------------------------------
+    
     // Circular buffer for audio frames
     AudioFrame buffer[BUFFER_CAPACITY];
     int head;
@@ -84,6 +104,8 @@ public:
     void stop();
     void next();
     void prev();
+    
+    void playEffect(const std::string& filename);
     
     void toggleVisualizer();
     bool isVisualizerActive() const { return visualizer_active.load(); }

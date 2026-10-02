@@ -17,6 +17,7 @@ void printMenu() {
               << "  ls            - Mostrar lista de reproducción\n"
               << "  clear         - Vaciar lista de reproducción\n"
               << "  v             - Mostrar/Ocultar Visualizador de Espectro\n"
+              << "  fx <archivo>  - Reproducir efecto/audio encima de la música\n"
               << "  exit          - Salir\n"
               << "> " << std::flush;
 }
@@ -82,6 +83,12 @@ int main() {
                 std::cout << "\033[11B\n\n"; // Mover cursor abajo para no sobreescribir y reimprimir
                 printMenu();
             }
+        } else if (cmd == "fx") {
+            std::string fx_name;
+            std::getline(std::cin, fx_name);
+            if (!fx_name.empty() && fx_name[0] == ' ') fx_name.erase(0, 1);
+            engine->playEffect(fx_name);
+            std::cout << "[FX] Reproduciendo: " << fx_name << "\n> " << std::flush;
         } else if (cmd == "exit") {
             break;
         } else if (cmd == "help") {
