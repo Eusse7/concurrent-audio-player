@@ -14,7 +14,7 @@ con `pthread_rwlock_t`), y todo se visualiza en vivo en una TUI ncurses.
   ▀▀▀ ▀▀▀ ▀  ▀ ▀▀▀ ▀▀▀   ▀   ▀▀▀ ▀ ▀  ▀  ▀▀▀ ▀ ▀
 ```
 
-## Vídeo Sustentación:
+## Vídeo Sustentación: https://youtu.be/tdl3TOwmX0Q
 
 
 ## Características
